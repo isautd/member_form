@@ -9,6 +9,7 @@ import {
 } from "framer-motion";
 
 import { ArrowLeft, ArrowRight } from "lucide-react";
+import { QRCodeSVG } from "qrcode.react";
 
 import { useEffect, useRef, useState } from "react";
 
@@ -115,18 +116,27 @@ type MemberData = {
   graduationInfo: string;
   interests: string[];
   otherInterest: string;
+  memberId: string;
+  token: string;
 };
 
 /* -------------------------------------------------- */
 /* COMPONENT                                          */
 /* -------------------------------------------------- */
 export default function DigitalPass() {
-  const [step, setStep]                           = useState(0);
-  const [errors, setErrors]                       = useState<Record<string, string>>({});
-  const [loading, setLoading]                     = useState(false);
-  const [submitError, setSubmitError]             = useState("");
-  const [showUpdatePrompt, setShowUpdatePrompt]   = useState(false);
-  const [existingMember, setExistingMember]       = useState<MemberData | null>(null);
+  const [step, setStep]                         = useState(0);
+  const [errors, setErrors]                     = useState<Record<string, string>>({});
+  const [loading, setLoading]                   = useState(false);
+  const [submitError, setSubmitError]           = useState("");
+  const [showUpdatePrompt, setShowUpdatePrompt] = useState(false);
+  const [existingMember, setExistingMember]     = useState<MemberData | null>(null);
+
+  // Member ID and token returned from the API after successful submission
+  const [memberId, setMemberId]       = useState("");
+  const [memberToken, setMemberToken] = useState("");
+
+  // Full QR URL — built client-side so window.location.origin is available
+  const [qrUrl, setQrUrl] = useState("");
 
   const [formData, setFormData] = useState({
     firstName:        "",
@@ -144,6 +154,15 @@ export default function DigitalPass() {
   });
 
   const confettiRef = useConfetti(step === 5);
+
+  // Build the QR URL once we have both memberId and token
+  useEffect(() => {
+    if (memberId && memberToken && typeof window !== "undefined") {
+      setQrUrl(
+        `${window.location.origin}/member/${memberId}?token=${memberToken}`
+      );
+    }
+  }, [memberId, memberToken]);
 
   /* ---------------------------------- */
   /* MOTION                             */
@@ -242,9 +261,9 @@ export default function DigitalPass() {
 
   const validateStep3 = () => {
     const errs: Record<string, string> = {};
-    if (!formData.status)                errs.status           = "Please select one";
+    if (!formData.status)                  errs.status           = "Please select one";
     if (!formData.startingSemester.trim()) errs.startingSemester = "Required";
-    if (!formData.graduationInfo.trim()) errs.graduationInfo   = "Required";
+    if (!formData.graduationInfo.trim())   errs.graduationInfo   = "Required";
     setErrors(errs);
     if (!Object.keys(errs).length) setStep(4);
   };
@@ -254,7 +273,7 @@ export default function DigitalPass() {
   /* ---------------------------------- */
   const buildPayload = (extra: Record<string, unknown> = {}) => ({
     ...formData,
-    graduationInfo: semesterRange,
+    graduationInfo:   semesterRange,
     startingSemester: undefined,
     ...extra,
   });
@@ -281,13 +300,16 @@ export default function DigitalPass() {
       const data = await response.json();
 
       if (data.message === "already_registered") {
-        // Store the existing member data and show the update prompt
         setExistingMember(data.member ?? null);
         setShowUpdatePrompt(true);
         return;
       }
 
       if (!data.success) throw new Error();
+
+      // Store the returned ID and token — QR is built from these
+      setMemberId(data.memberId);
+      setMemberToken(data.token);
       setStep(5);
     } catch {
       setSubmitError("Something went wrong. Please try again.");
@@ -296,7 +318,6 @@ export default function DigitalPass() {
     }
   };
 
-  // "Update my info" — overwrite the existing row with newly entered data
   const handleUpdate = async () => {
     try {
       setLoading(true);
@@ -311,6 +332,8 @@ export default function DigitalPass() {
       const data = await response.json();
       if (!data.success) throw new Error();
 
+      setMemberId(data.memberId);
+      setMemberToken(data.token);
       setShowUpdatePrompt(false);
       setStep(5);
     } catch {
@@ -320,7 +343,6 @@ export default function DigitalPass() {
     }
   };
 
-  // "Show my pass" — skip the API, populate formData from sheet data and show pass
   const handleShowPass = () => {
     if (!existingMember) return;
     setFormData((p) => ({
@@ -332,12 +354,14 @@ export default function DigitalPass() {
       countryCode:      existingMember.countryCode,
       whatsappNumber:   existingMember.whatsappNumber,
       status:           existingMember.status,
-      // graduationInfo already contains the full range string from the sheet
       graduationInfo:   existingMember.graduationInfo,
       startingSemester: "",
       interests:        existingMember.interests,
       otherInterest:    existingMember.otherInterest,
     }));
+    // Use the existing member's stored ID and token for the QR
+    setMemberId(existingMember.memberId);
+    setMemberToken(existingMember.token);
     setShowUpdatePrompt(false);
     setStep(5);
   };
@@ -359,7 +383,7 @@ export default function DigitalPass() {
         />
       )}
 
-      {/* BACK BUTTON — hidden on welcome and confirmation */}
+      {/* BACK BUTTON */}
       {step > 0 && step < 5 && (
         <button
           onClick={goBack}
@@ -375,9 +399,7 @@ export default function DigitalPass() {
         </button>
       )}
 
-      {/* FLOATING LOGO — only on steps 1+
-          Animates in from above with a spring so it appears to "land"
-          after the in-card logo flies upward on step 0 exit. */}
+      {/* FLOATING LOGO — steps 1+ only */}
       <AnimatePresence>
         {step > 0 && (
           <motion.div
@@ -411,17 +433,13 @@ export default function DigitalPass() {
             />
           </div>
 
-          {/* CONTENT
-              - Step 0: centered vertically (welcome screen, no back button)
-              - Steps 1–4: starts from top with enough padding to clear the back
-                button on mobile, and is scrollable if content overflows
-          */}
+          {/* CONTENT */}
           <div
             className={`
               flex min-h-[72vh] sm:min-h-[680px] px-4 sm:px-8
               ${step === 0
                 ? "items-center justify-center py-14 sm:py-20"
-                : "items-start justify-center sm:items-center overflow-y-auto pt-[6.5rem] pb-10 sm:pt-20 sm:pb-10"
+                : "items-start justify-center overflow-y-auto pt-[6.5rem] pb-10 sm:pt-20 sm:pb-10"
               }
             `}
           >
@@ -431,27 +449,15 @@ export default function DigitalPass() {
                 {/* ── STEP 0 — WELCOME ── */}
                 {step === 0 && (
                   <StepWrapper key="step0">
-                    {/* Logo sits centered in the card on the welcome screen.
-                        On exit it flies upward to simulate moving to the
-                        floating position that springs in on step 1. */}
                     <motion.div
                       exit={{ y: -80, scale: 0.45, opacity: 0 }}
                       transition={{ duration: 0.28, ease: "easeIn" }}
-                      className="
-                        flex h-20 w-20 items-center justify-center self-center
-                        rounded-full border border-white/10 bg-[#0f0f11]/92
-                        shadow-[0_10px_40px_rgba(0,0,0,0.55)] backdrop-blur-2xl
-                      "
+                      className="flex h-20 w-20 items-center justify-center self-center rounded-full border border-white/10 bg-[#0f0f11]/92 shadow-[0_10px_40px_rgba(0,0,0,0.55)] backdrop-blur-2xl"
                     >
-                      <img
-                        src="/isa-logo.png"
-                        alt="ISA Logo"
-                        className="h-14 w-14 object-contain"
-                      />
+                      <img src="/isa-logo.png" alt="ISA Logo" className="h-14 w-14 object-contain" />
                     </motion.div>
-
                     <h1 className="text-center text-2xl font-semibold text-white sm:text-3xl">
-                      Welcome to UTD-ISA
+                      Welcome to UTD - ISA
                     </h1>
                     <p className="text-center text-sm text-white/60">
                       Indian Student Association at UT Dallas Membership
@@ -470,23 +476,17 @@ export default function DigitalPass() {
                       onChange={(e) => setFormData({ ...formData, website: e.target.value })}
                     />
                     <div className="text-center">
-                      <h2 className="text-xl text-white sm:text-2xl">
-                        Every great story starts with a name.
-                      </h2>
+                      <h2 className="text-xl text-white sm:text-2xl">Every great story starts with a name.</h2>
                       <p className="mt-1 text-sm text-white/40">Yours included.</p>
                     </div>
                     <div className="flex flex-col gap-1">
                       <GlassInput label="First Name" value={formData.firstName}
-                        onChange={(e) => handleNameChange("firstName", e.target.value)}
-                        error={errors.firstName}
-                      />
+                        onChange={(e) => handleNameChange("firstName", e.target.value)} error={errors.firstName} />
                       <FieldError msg={errors.firstName} />
                     </div>
                     <div className="flex flex-col gap-1">
                       <GlassInput label="Last Name" value={formData.lastName}
-                        onChange={(e) => handleNameChange("lastName", e.target.value)}
-                        error={errors.lastName}
-                      />
+                        onChange={(e) => handleNameChange("lastName", e.target.value)} error={errors.lastName} />
                       <FieldError msg={errors.lastName} />
                     </div>
                     <div className="flex justify-center">
@@ -507,8 +507,7 @@ export default function DigitalPass() {
                     <div className="flex flex-col gap-1">
                       <GlassInput label="NetID" value={formData.netId}
                         onChange={(e) => { setFormData({ ...formData, netId: e.target.value }); setErrors((p) => ({ ...p, netId: "" })); }}
-                        error={errors.netId}
-                      />
+                        error={errors.netId} />
                       {!errors.netId && (
                         <Hint text={formData.netId ? `${formData.netId}@utdallas.edu` : "@utdallas.edu will be appended"} />
                       )}
@@ -516,19 +515,15 @@ export default function DigitalPass() {
                     </div>
                     <div className="flex flex-col gap-1">
                       <GlassInput label="Personal Email" value={formData.personalEmail}
-                        onChange={(e) => handleEmailChange(e.target.value)}
-                        error={errors.personalEmail}
-                      />
+                        onChange={(e) => handleEmailChange(e.target.value)} error={errors.personalEmail} />
                       <FieldError msg={errors.personalEmail} />
                     </div>
                     <div className="flex flex-col gap-1">
                       <div className="flex items-center gap-3">
                         <div className="relative min-w-[84px]">
-                          <select
-                            value={formData.countryCode}
+                          <select value={formData.countryCode}
                             onChange={(e) => setFormData({ ...formData, countryCode: e.target.value })}
-                            className="h-12 sm:h-14 w-full appearance-none rounded-xl border border-white/10 bg-[#1c1c1e] px-3 pr-8 text-center text-sm text-white outline-none"
-                          >
+                            className="h-12 sm:h-14 w-full appearance-none rounded-xl border border-white/10 bg-[#1c1c1e] px-3 pr-8 text-center text-sm text-white outline-none">
                             <option value="+1">+1</option>
                             <option value="+91">+91</option>
                             <option value="+44">+44</option>
@@ -537,14 +532,11 @@ export default function DigitalPass() {
                           <div className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-white/50">▼</div>
                         </div>
                         <div className="flex-1">
-                          <GlassInput
-                            label="WhatsApp Number"
-                            inputMode="numeric"
+                          <GlassInput label="WhatsApp Number" inputMode="numeric"
                             value={formData.whatsappNumber}
                             onChange={(e) => handleWhatsAppChange(e.target.value)}
                             error={errors.whatsappNumber}
-                            hint={formData.whatsappNumber.length > 0 ? `${formData.whatsappNumber.length}/10` : undefined}
-                          />
+                            hint={formData.whatsappNumber.length > 0 ? `${formData.whatsappNumber.length}/10` : undefined} />
                         </div>
                       </div>
                       <FieldError msg={errors.whatsappNumber} />
@@ -560,9 +552,7 @@ export default function DigitalPass() {
                 {step === 3 && (
                   <StepWrapper key="step3">
                     <div className="text-center">
-                      <h2 className="text-xl text-white sm:text-2xl">
-                        Where are you in your UTD journey?
-                      </h2>
+                      <h2 className="text-xl text-white sm:text-2xl">Where are you in your UTD journey?</h2>
                       <p className="mt-1 text-sm text-white/40">Student or alumni — and when.</p>
                     </div>
                     <div className="flex flex-col gap-1 items-center">
@@ -574,29 +564,22 @@ export default function DigitalPass() {
                               formData.status === s
                                 ? "scale-[1.03] border-transparent bg-gradient-to-r from-[#FF9933] to-[#138808] text-white shadow-lg shadow-orange-500/20"
                                 : "border-white/10 bg-white/5 text-white/80 hover:bg-white/10"
-                            }`}
-                          >
-                            {s}
-                          </button>
+                            }`}>{s}</button>
                         ))}
                       </div>
                       <FieldError msg={errors.status} />
                     </div>
                     <div className="flex flex-col gap-1">
-                      <GlassInput label="Starting semester"
-                        value={formData.startingSemester}
+                      <GlassInput label="Starting semester" value={formData.startingSemester}
                         onChange={(e) => { setFormData({ ...formData, startingSemester: e.target.value }); setErrors((p) => ({ ...p, startingSemester: "" })); }}
-                        error={errors.startingSemester}
-                      />
+                        error={errors.startingSemester} />
                       {!errors.startingSemester && <Hint text="e.g. Fall 2023, Spring 2024" />}
                       <FieldError msg={errors.startingSemester} />
                     </div>
                     <div className="flex flex-col gap-1">
-                      <GlassInput label={graduationLabel}
-                        value={formData.graduationInfo}
+                      <GlassInput label={graduationLabel} value={formData.graduationInfo}
                         onChange={(e) => { setFormData({ ...formData, graduationInfo: e.target.value }); setErrors((p) => ({ ...p, graduationInfo: "" })); }}
-                        error={errors.graduationInfo}
-                      />
+                        error={errors.graduationInfo} />
                       {!errors.graduationInfo && <Hint text={graduationHint} />}
                       <FieldError msg={errors.graduationInfo} />
                     </div>
@@ -624,21 +607,16 @@ export default function DigitalPass() {
                               formData.interests.includes(i)
                                 ? "scale-[1.03] border-transparent bg-gradient-to-r from-[#FF9933] to-[#138808] text-white shadow-lg shadow-orange-500/20"
                                 : "border-white/10 bg-white/5 text-white/80 hover:bg-white/10"
-                            }`}
-                          >
-                            {i}
-                          </button>
+                            }`}>{i}</button>
                         ))}
                       </div>
                       <FieldError msg={errors.interests} />
                     </div>
                     {formData.interests.includes("Other") && (
                       <div className="flex flex-col gap-1">
-                        <GlassInput label="Your interest"
-                          value={formData.otherInterest}
+                        <GlassInput label="Your interest" value={formData.otherInterest}
                           onChange={(e) => { setFormData({ ...formData, otherInterest: e.target.value }); setErrors((p) => ({ ...p, otherInterest: "" })); }}
-                          error={errors.otherInterest}
-                        />
+                          error={errors.otherInterest} />
                         {!errors.otherInterest && <Hint text="e.g. Photography, Art, Comedy" />}
                         <FieldError msg={errors.otherInterest} />
                       </div>
@@ -652,39 +630,23 @@ export default function DigitalPass() {
                           animate={{ opacity: 1, y: 0, scale: 1 }}
                           exit={{ opacity: 0, y: 8, scale: 0.97 }}
                           transition={{ type: "spring", stiffness: 260, damping: 24 }}
-                          className="
-                            absolute inset-x-0 bottom-0 z-40 mx-4 mb-4
-                            rounded-2xl border border-white/10
-                            bg-[#0f0f11]/95 backdrop-blur-2xl p-5
-                            flex flex-col gap-4
-                          "
+                          className="absolute inset-x-0 bottom-0 z-40 mx-4 mb-4 rounded-2xl border border-white/10 bg-[#0f0f11]/95 backdrop-blur-2xl p-5 flex flex-col gap-4"
                         >
                           <div className="text-center">
-                            <p className="text-base font-semibold text-white">
-                              Looks like you&apos;re already one of us! 👋
-                            </p>
-                            <p className="mt-1 text-xs text-white/50">
-                              Want to update your info with what you just entered?
-                            </p>
+                            <p className="text-base font-semibold text-white">Looks like you&apos;re already one of us! 👋</p>
+                            <p className="mt-1 text-xs text-white/50">Want to update your info with what you just entered?</p>
                           </div>
                           <div className="flex gap-3">
-                            <button
-                              onClick={handleShowPass}
-                              className="flex-1 h-10 rounded-xl border border-white/10 bg-white/5 text-sm text-white/70 transition hover:bg-white/10 active:scale-95"
-                            >
+                            <button onClick={handleShowPass}
+                              className="flex-1 h-10 rounded-xl border border-white/10 bg-white/5 text-sm text-white/70 transition hover:bg-white/10 active:scale-95">
                               Show my pass
                             </button>
-                            <button
-                              onClick={handleUpdate}
-                              disabled={loading}
-                              className="flex-1 h-10 rounded-xl bg-white text-sm text-black transition hover:scale-[1.02] active:scale-[0.98] disabled:opacity-60"
-                            >
+                            <button onClick={handleUpdate} disabled={loading}
+                              className="flex-1 h-10 rounded-xl bg-white text-sm text-black transition hover:scale-[1.02] active:scale-[0.98] disabled:opacity-60">
                               {loading ? "Updating..." : "Update my info"}
                             </button>
                           </div>
-                          {submitError && (
-                            <p className="text-center text-xs text-red-400">{submitError}</p>
-                          )}
+                          {submitError && <p className="text-center text-xs text-red-400">{submitError}</p>}
                         </motion.div>
                       )}
                     </AnimatePresence>
@@ -694,11 +656,8 @@ export default function DigitalPass() {
                     )}
                     {!showUpdatePrompt && (
                       <div className="flex justify-center">
-                        <button
-                          onClick={submitMembership}
-                          disabled={loading}
-                          className={`${compactBtn} disabled:cursor-not-allowed disabled:opacity-60`}
-                        >
+                        <button onClick={submitMembership} disabled={loading}
+                          className={`${compactBtn} disabled:cursor-not-allowed disabled:opacity-60`}>
                           {loading ? "Submitting..." : "Finish"}
                         </button>
                       </div>
@@ -709,6 +668,7 @@ export default function DigitalPass() {
                 {/* ── STEP 5 — CONFIRMATION ── */}
                 {step === 5 && (
                   <StepWrapper key="step5">
+                    {/* Animated check */}
                     <motion.div
                       initial={{ scale: 0, rotate: -180 }}
                       animate={{ scale: 1, rotate: 0 }}
@@ -718,32 +678,25 @@ export default function DigitalPass() {
                         <div className="absolute h-20 w-20 rounded-full bg-gradient-to-br from-[#FF9933] via-white to-[#138808] opacity-30 blur-xl" />
                         <div className="relative flex h-16 w-16 items-center justify-center rounded-full border-2 border-white/20 bg-[#0f0f11]">
                           <svg viewBox="0 0 24 24" className="h-8 w-8" fill="none">
-                            <motion.path
-                              d="M5 13l4 4L19 7"
-                              stroke="#138808" strokeWidth="2.5"
-                              strokeLinecap="round" strokeLinejoin="round"
-                              initial={{ pathLength: 0 }}
-                              animate={{ pathLength: 1 }}
-                              transition={{ duration: 0.5, delay: 0.4 }}
-                            />
+                            <motion.path d="M5 13l4 4L19 7"
+                              stroke="#138808" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+                              initial={{ pathLength: 0 }} animate={{ pathLength: 1 }}
+                              transition={{ duration: 0.5, delay: 0.4 }} />
                           </svg>
                         </div>
                       </div>
                     </motion.div>
 
                     <motion.p
-                      initial={{ opacity: 0, y: 8 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ delay: 0.55 }}
+                      initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.55 }}
                       className="text-center text-xl font-semibold text-white"
                     >
-                      You&apos;re in! Welcome to UTD-ISA 🎉
+                      You&apos;re in! Welcome to UTD - ISA 🎉
                     </motion.p>
 
                     {/* MEMBER CARD */}
                     <motion.div
-                      initial={{ opacity: 0, y: 32 }}
-                      animate={{ opacity: 1, y: 0 }}
+                      initial={{ opacity: 0, y: 32 }} animate={{ opacity: 1, y: 0 }}
                       transition={{ delay: 0.65, type: "spring", stiffness: 180, damping: 22 }}
                       className="relative w-full"
                     >
@@ -761,50 +714,65 @@ export default function DigitalPass() {
                         />
                         <img src="/chakra.svg" className="absolute right-[-8px] top-[-8px] h-24 w-24 opacity-[0.06] pointer-events-none" />
                         <div className="flex flex-col items-center gap-4 px-6 py-7">
-                          <motion.div
-                            initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }}
-                            transition={{ delay: 0.8 }}
-                            className="flex h-14 w-14 items-center justify-center rounded-full border border-white/10 bg-black/40"
-                          >
+                          <motion.div initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} transition={{ delay: 0.8 }}
+                            className="flex h-14 w-14 items-center justify-center rounded-full border border-white/10 bg-black/40">
                             <img src="/isa-logo.png" className="h-9 w-9 object-contain" />
                           </motion.div>
-                          <motion.p
-                            initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.9 }}
-                            className="text-[10px] font-medium uppercase tracking-[0.4em] text-white/40"
-                          >
+                          <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.9 }}
+                            className="text-[10px] font-medium uppercase tracking-[0.4em] text-white/40">
                             UTD · ISA · Member
                           </motion.p>
                           <div className="w-16 border-t border-white/10" />
-                          <motion.h3
-                            initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 1.0 }}
-                            className="text-2xl font-semibold tracking-tight text-white text-center"
-                          >
+                          <motion.h3 initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 1.0 }}
+                            className="text-2xl font-semibold tracking-tight text-white text-center">
                             {formData.firstName} {formData.lastName}
                           </motion.h3>
-                          <motion.p
-                            initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 1.1 }}
-                            className="text-sm text-white/60"
-                          >
-                            {formData.status}
-                          </motion.p>
-                          <motion.p
-                            initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 1.2 }}
-                            className="text-sm text-white/60"
-                          >
-                            {/* semesterRange is only valid for newly submitted forms;
-                                for "show my pass" the combined range is already in graduationInfo */}
+                          <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 1.1 }}
+                            className="text-sm text-white/60">{formData.status}</motion.p>
+                          <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 1.2 }}
+                            className="text-sm text-white/60">
                             {formData.startingSemester ? semesterRange : formData.graduationInfo}
                           </motion.p>
                           <div className="w-full border-t border-white/[0.07]" />
-                          <motion.p
-                            initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 1.3 }}
-                            className="text-xs tracking-wide text-white/30"
-                          >
+                          <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 1.3 }}
+                            className="text-xs tracking-wide text-white/30">
                             {formData.netId}@utdallas.edu
                           </motion.p>
                         </div>
                       </div>
                     </motion.div>
+
+                    {/* QR CODE — shown once qrUrl is ready */}
+                    {qrUrl && (
+                      <motion.div
+                        initial={{ opacity: 0, y: 16 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ delay: 1.4, type: "spring", stiffness: 180, damping: 22 }}
+                        className="relative w-full"
+                      >
+                        <div className="absolute -inset-1 rounded-[2rem] bg-gradient-to-br from-[#FF9933]/15 via-transparent to-[#138808]/15 blur-xl" />
+                        <div className="relative flex flex-col items-center gap-4 rounded-[1.75rem] border border-white/10 bg-white/[0.04] px-6 py-6 backdrop-blur-xl">
+                          {/* White padding around QR so scanners can read it */}
+                          <div className="rounded-2xl bg-white p-3 shadow-lg">
+                            <QRCodeSVG
+                              value={qrUrl}
+                              size={160}
+                              level="M"
+                              includeMargin={false}
+                            />
+                          </div>
+                          <div className="flex flex-col items-center gap-1 text-center">
+                            <p className="text-xs font-mono tracking-widest text-white/50">
+                              {memberId}
+                            </p>
+                            <p className="text-[11px] text-white/30">
+                              Save this in your device!
+                            </p>
+                          </div>
+                        </div>
+                      </motion.div>
+                    )}
+
                   </StepWrapper>
                 )}
 
