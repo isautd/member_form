@@ -8,7 +8,7 @@ import {
   useTransform,
 } from "framer-motion";
 
-import { ArrowLeft, ArrowRight, Sparkles } from "lucide-react";
+import { ArrowLeft, ArrowRight } from "lucide-react";
 
 import { useEffect, useRef, useState } from "react";
 
@@ -104,14 +104,29 @@ function FieldError({ msg }: { msg?: string }) {
   return <p className="text-xs text-red-400 pl-1 -mt-1">{msg}</p>;
 }
 
+type MemberData = {
+  firstName: string;
+  lastName: string;
+  netId: string;
+  personalEmail: string;
+  countryCode: string;
+  whatsappNumber: string;
+  status: string;
+  graduationInfo: string;
+  interests: string[];
+  otherInterest: string;
+};
+
 /* -------------------------------------------------- */
 /* COMPONENT                                          */
 /* -------------------------------------------------- */
 export default function DigitalPass() {
-  const [step, setStep]               = useState(0);
-  const [errors, setErrors]           = useState<Record<string, string>>({});
-  const [loading, setLoading]         = useState(false);
-  const [submitError, setSubmitError] = useState("");
+  const [step, setStep]                           = useState(0);
+  const [errors, setErrors]                       = useState<Record<string, string>>({});
+  const [loading, setLoading]                     = useState(false);
+  const [submitError, setSubmitError]             = useState("");
+  const [showUpdatePrompt, setShowUpdatePrompt]   = useState(false);
+  const [existingMember, setExistingMember]       = useState<MemberData | null>(null);
 
   const [formData, setFormData] = useState({
     firstName:        "",
@@ -121,7 +136,6 @@ export default function DigitalPass() {
     countryCode:      "+1",
     whatsappNumber:   "",
     status:           "",
-    // Two separate fields in UI — combined into one string on submit
     startingSemester: "",
     graduationInfo:   "",
     interests:        [] as string[],
@@ -149,6 +163,7 @@ export default function DigitalPass() {
   const goBack = () => {
     setErrors({});
     setSubmitError("");
+    setShowUpdatePrompt(false);
     setStep((p) => Math.max(0, p - 1));
   };
 
@@ -175,22 +190,14 @@ export default function DigitalPass() {
   const toggleInterest = (interest: string) => {
     setFormData((p) => {
       const exists = p.interests.includes(interest);
-      return {
-        ...p,
-        interests: exists
-          ? p.interests.filter((i) => i !== interest)
-          : [...p.interests, interest],
-      };
+      return { ...p, interests: exists ? p.interests.filter((i) => i !== interest) : [...p.interests, interest] };
     });
     setErrors((p) => ({ ...p, interests: "" }));
   };
 
   /* ---------------------------------- */
-  /* DYNAMIC LABELS                     */
+  /* LABELS & DERIVED VALUES            */
   /* ---------------------------------- */
-  const startingLabel = "Starting semester";
-  const startingHint  = "e.g. Fall 2023, Spring 2024";
-
   const graduationLabel =
     formData.status === "Alumni"  ? "Graduating semester" :
     formData.status === "Student" ? "Expected graduation"  :
@@ -201,7 +208,6 @@ export default function DigitalPass() {
       ? "e.g. Fall 2024, Spring 2023"
       : "e.g. Fall 2026, Spring 2027";
 
-  // The combined range shown on the final card and sent to Google Sheets
   const semesterRange =
     formData.startingSemester && formData.graduationInfo
       ? `${formData.startingSemester} – ${formData.graduationInfo}`
@@ -236,15 +242,22 @@ export default function DigitalPass() {
 
   const validateStep3 = () => {
     const errs: Record<string, string> = {};
-    if (!formData.status)
-      errs.status = "Please select one";
-    if (!formData.startingSemester.trim())
-      errs.startingSemester = "Required";
-    if (!formData.graduationInfo.trim())
-      errs.graduationInfo = "Required";
+    if (!formData.status)                errs.status           = "Please select one";
+    if (!formData.startingSemester.trim()) errs.startingSemester = "Required";
+    if (!formData.graduationInfo.trim()) errs.graduationInfo   = "Required";
     setErrors(errs);
     if (!Object.keys(errs).length) setStep(4);
   };
+
+  /* ---------------------------------- */
+  /* SUBMIT & UPDATE                    */
+  /* ---------------------------------- */
+  const buildPayload = (extra: Record<string, unknown> = {}) => ({
+    ...formData,
+    graduationInfo: semesterRange,
+    startingSemester: undefined,
+    ...extra,
+  });
 
   const submitMembership = async () => {
     const errs: Record<string, string> = {};
@@ -262,19 +275,18 @@ export default function DigitalPass() {
       const response = await fetch("/api/submit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...formData,
-          // Combine both semesters into the single graduationInfo cell
-          // so the Google Sheet receives e.g. "Fall 2025 - Spring 2027"
-          // No changes needed on the sheet or API route side.
-          graduationInfo: semesterRange,
-          // startingSemester is intentionally omitted — it's already
-          // baked into graduationInfo above, so no extra column is created.
-          startingSemester: undefined,
-        }),
+        body: JSON.stringify(buildPayload()),
       });
 
       const data = await response.json();
+
+      if (data.message === "already_registered") {
+        // Store the existing member data and show the update prompt
+        setExistingMember(data.member ?? null);
+        setShowUpdatePrompt(true);
+        return;
+      }
+
       if (!data.success) throw new Error();
       setStep(5);
     } catch {
@@ -282,6 +294,52 @@ export default function DigitalPass() {
     } finally {
       setLoading(false);
     }
+  };
+
+  // "Update my info" — overwrite the existing row with newly entered data
+  const handleUpdate = async () => {
+    try {
+      setLoading(true);
+      setSubmitError("");
+
+      const response = await fetch("/api/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildPayload({ forceUpdate: true })),
+      });
+
+      const data = await response.json();
+      if (!data.success) throw new Error();
+
+      setShowUpdatePrompt(false);
+      setStep(5);
+    } catch {
+      setSubmitError("Update failed. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // "Show my pass" — skip the API, populate formData from sheet data and show pass
+  const handleShowPass = () => {
+    if (!existingMember) return;
+    setFormData((p) => ({
+      ...p,
+      firstName:        existingMember.firstName,
+      lastName:         existingMember.lastName,
+      netId:            existingMember.netId,
+      personalEmail:    existingMember.personalEmail,
+      countryCode:      existingMember.countryCode,
+      whatsappNumber:   existingMember.whatsappNumber,
+      status:           existingMember.status,
+      // graduationInfo already contains the full range string from the sheet
+      graduationInfo:   existingMember.graduationInfo,
+      startingSemester: "",
+      interests:        existingMember.interests,
+      otherInterest:    existingMember.otherInterest,
+    }));
+    setShowUpdatePrompt(false);
+    setStep(5);
   };
 
   /* ---------------------------------- */
@@ -301,7 +359,7 @@ export default function DigitalPass() {
         />
       )}
 
-      {/* BACK BUTTON */}
+      {/* BACK BUTTON — hidden on welcome and confirmation */}
       {step > 0 && step < 5 && (
         <button
           onClick={goBack}
@@ -317,16 +375,28 @@ export default function DigitalPass() {
         </button>
       )}
 
-      {/* FLOATING LOGO */}
-      <div className="
-        pointer-events-none absolute left-1/2 top-0 z-[70]
-        flex h-16 w-16 sm:h-20 sm:w-20
-        -translate-x-1/2 -translate-y-[42%] items-center justify-center
-        rounded-full border border-white/10 bg-[#0f0f11]/92
-        shadow-[0_10px_40px_rgba(0,0,0,0.55)] backdrop-blur-2xl
-      ">
-        <img src="/isa-logo.png" alt="ISA Logo" className="h-10 w-10 sm:h-14 sm:w-14 object-contain" />
-      </div>
+      {/* FLOATING LOGO — only on steps 1+
+          Animates in from above with a spring so it appears to "land"
+          after the in-card logo flies upward on step 0 exit. */}
+      <AnimatePresence>
+        {step > 0 && (
+          <motion.div
+            key="floating-logo"
+            initial={{ opacity: 0, y: -20, scale: 0.5 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            transition={{ type: "spring", stiffness: 200, damping: 20, delay: 0.05 }}
+            className="
+              pointer-events-none absolute left-1/2 top-0 z-[70]
+              flex h-16 w-16 sm:h-20 sm:w-20
+              -translate-x-1/2 -translate-y-[42%] items-center justify-center
+              rounded-full border border-white/10 bg-[#0f0f11]/92
+              shadow-[0_10px_40px_rgba(0,0,0,0.55)] backdrop-blur-2xl
+            "
+          >
+            <img src="/isa-logo.png" alt="ISA Logo" className="h-10 w-10 sm:h-14 sm:w-14 object-contain" />
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* OUTER SHELL */}
       <div className="relative overflow-visible rounded-2xl sm:rounded-[2rem] shadow-[0_30px_90px_-20px_rgba(0,0,0,0.95)]">
@@ -341,20 +411,50 @@ export default function DigitalPass() {
             />
           </div>
 
-          {/* CONTENT */}
-          <div className="flex min-h-[72vh] sm:min-h-[680px] items-center justify-center px-4 sm:px-8 py-14 sm:py-20">
+          {/* CONTENT
+              - Step 0: centered vertically (welcome screen, no back button)
+              - Steps 1–4: starts from top with enough padding to clear the back
+                button on mobile, and is scrollable if content overflows
+          */}
+          <div
+            className={`
+              flex min-h-[72vh] sm:min-h-[680px] px-4 sm:px-8
+              ${step === 0
+                ? "items-center justify-center py-14 sm:py-20"
+                : "items-start justify-center sm:items-center overflow-y-auto pt-[6.5rem] pb-10 sm:pt-20 sm:pb-10"
+              }
+            `}
+          >
             <div className="w-full max-w-[22rem]">
               <AnimatePresence mode="wait">
 
                 {/* ── STEP 0 — WELCOME ── */}
                 {step === 0 && (
                   <StepWrapper key="step0">
-                    <Sparkles className="h-10 w-10 text-white" />
+                    {/* Logo sits centered in the card on the welcome screen.
+                        On exit it flies upward to simulate moving to the
+                        floating position that springs in on step 1. */}
+                    <motion.div
+                      exit={{ y: -80, scale: 0.45, opacity: 0 }}
+                      transition={{ duration: 0.28, ease: "easeIn" }}
+                      className="
+                        flex h-20 w-20 items-center justify-center self-center
+                        rounded-full border border-white/10 bg-[#0f0f11]/92
+                        shadow-[0_10px_40px_rgba(0,0,0,0.55)] backdrop-blur-2xl
+                      "
+                    >
+                      <img
+                        src="/isa-logo.png"
+                        alt="ISA Logo"
+                        className="h-14 w-14 object-contain"
+                      />
+                    </motion.div>
+
                     <h1 className="text-center text-2xl font-semibold text-white sm:text-3xl">
-                      Welcome to ISA
+                      Welcome to UTD-ISA
                     </h1>
                     <p className="text-center text-sm text-white/60">
-                      Indian Student Association Membership
+                      Indian Student Association at UT Dallas Membership
                     </p>
                     <button onClick={() => setStep(1)} className={fullBtn}>
                       Get Started <ArrowRight className="ml-2 inline h-4 w-4" />
@@ -404,13 +504,9 @@ export default function DigitalPass() {
                       </h2>
                       <p className="mt-1 text-sm text-white/40">Won&apos;t spam, promise.</p>
                     </div>
-
                     <div className="flex flex-col gap-1">
                       <GlassInput label="NetID" value={formData.netId}
-                        onChange={(e) => {
-                          setFormData({ ...formData, netId: e.target.value });
-                          setErrors((p) => ({ ...p, netId: "" }));
-                        }}
+                        onChange={(e) => { setFormData({ ...formData, netId: e.target.value }); setErrors((p) => ({ ...p, netId: "" })); }}
                         error={errors.netId}
                       />
                       {!errors.netId && (
@@ -418,7 +514,6 @@ export default function DigitalPass() {
                       )}
                       <FieldError msg={errors.netId} />
                     </div>
-
                     <div className="flex flex-col gap-1">
                       <GlassInput label="Personal Email" value={formData.personalEmail}
                         onChange={(e) => handleEmailChange(e.target.value)}
@@ -426,7 +521,6 @@ export default function DigitalPass() {
                       />
                       <FieldError msg={errors.personalEmail} />
                     </div>
-
                     <div className="flex flex-col gap-1">
                       <div className="flex items-center gap-3">
                         <div className="relative min-w-[84px]">
@@ -455,7 +549,6 @@ export default function DigitalPass() {
                       </div>
                       <FieldError msg={errors.whatsappNumber} />
                     </div>
-
                     {submitError && <p className="text-center text-sm text-red-400">{submitError}</p>}
                     <div className="flex justify-center">
                       <button onClick={validateStep2} className={compactBtn}>Continue</button>
@@ -472,23 +565,16 @@ export default function DigitalPass() {
                       </h2>
                       <p className="mt-1 text-sm text-white/40">Student or alumni — and when.</p>
                     </div>
-
-                    {/* STATUS */}
                     <div className="flex flex-col gap-1 items-center">
                       <div className="flex gap-3">
                         {["Student", "Alumni"].map((s) => (
-                          <button
-                            key={s}
-                            onClick={() => {
-                              setFormData({ ...formData, status: s });
-                              setErrors((p) => ({ ...p, status: "" }));
-                            }}
-                            className={`
-                              rounded-full border px-6 py-2.5 text-sm transition-all duration-300
-                              ${formData.status === s
+                          <button key={s}
+                            onClick={() => { setFormData({ ...formData, status: s }); setErrors((p) => ({ ...p, status: "" })); }}
+                            className={`rounded-full border px-6 py-2.5 text-sm transition-all duration-300 ${
+                              formData.status === s
                                 ? "scale-[1.03] border-transparent bg-gradient-to-r from-[#FF9933] to-[#138808] text-white shadow-lg shadow-orange-500/20"
-                                : "border-white/10 bg-white/5 text-white/80 hover:bg-white/10"}
-                            `}
+                                : "border-white/10 bg-white/5 text-white/80 hover:bg-white/10"
+                            }`}
                           >
                             {s}
                           </button>
@@ -496,44 +582,27 @@ export default function DigitalPass() {
                       </div>
                       <FieldError msg={errors.status} />
                     </div>
-
-                    {/* STARTING SEMESTER */}
                     <div className="flex flex-col gap-1">
-                      <GlassInput
-                        label={startingLabel}
+                      <GlassInput label="Starting semester"
                         value={formData.startingSemester}
-                        onChange={(e) => {
-                          setFormData({ ...formData, startingSemester: e.target.value });
-                          setErrors((p) => ({ ...p, startingSemester: "" }));
-                        }}
+                        onChange={(e) => { setFormData({ ...formData, startingSemester: e.target.value }); setErrors((p) => ({ ...p, startingSemester: "" })); }}
                         error={errors.startingSemester}
                       />
-                      {!errors.startingSemester && <Hint text={startingHint} />}
+                      {!errors.startingSemester && <Hint text="e.g. Fall 2023, Spring 2024" />}
                       <FieldError msg={errors.startingSemester} />
                     </div>
-
-                    {/* GRADUATION / EXPECTED GRADUATION */}
                     <div className="flex flex-col gap-1">
-                      <GlassInput
-                        label={graduationLabel}
+                      <GlassInput label={graduationLabel}
                         value={formData.graduationInfo}
-                        onChange={(e) => {
-                          setFormData({ ...formData, graduationInfo: e.target.value });
-                          setErrors((p) => ({ ...p, graduationInfo: "" }));
-                        }}
+                        onChange={(e) => { setFormData({ ...formData, graduationInfo: e.target.value }); setErrors((p) => ({ ...p, graduationInfo: "" })); }}
                         error={errors.graduationInfo}
                       />
                       {!errors.graduationInfo && <Hint text={graduationHint} />}
                       <FieldError msg={errors.graduationInfo} />
                     </div>
-
-                    {/* Live preview of the combined range */}
                     {(formData.startingSemester || formData.graduationInfo) && (
-                      <p className="text-center text-xs text-white/30">
-                        {semesterRange}
-                      </p>
+                      <p className="text-center text-xs text-white/30">{semesterRange}</p>
                     )}
-
                     <div className="flex justify-center">
                       <button onClick={validateStep3} className={compactBtn}>Continue</button>
                     </div>
@@ -544,24 +613,18 @@ export default function DigitalPass() {
                 {step === 4 && (
                   <StepWrapper key="step4">
                     <div className="text-center">
-                      <h2 className="text-xl text-white sm:text-2xl">
-                        What gets you on stage?
-                      </h2>
+                      <h2 className="text-xl text-white sm:text-2xl">What gets you on stage?</h2>
                       <p className="mt-1 text-sm text-white/40">Pick everything that applies.</p>
                     </div>
-
                     <div className="flex flex-col gap-1 items-center">
                       <div className="flex flex-wrap justify-center gap-2 sm:gap-3">
                         {["Dance", "Music", "Drama", "Other"].map((i) => (
-                          <button
-                            key={i}
-                            onClick={() => toggleInterest(i)}
-                            className={`
-                              whitespace-nowrap rounded-full border px-5 py-2.5 text-sm transition-all duration-300
-                              ${formData.interests.includes(i)
+                          <button key={i} onClick={() => toggleInterest(i)}
+                            className={`whitespace-nowrap rounded-full border px-5 py-2.5 text-sm transition-all duration-300 ${
+                              formData.interests.includes(i)
                                 ? "scale-[1.03] border-transparent bg-gradient-to-r from-[#FF9933] to-[#138808] text-white shadow-lg shadow-orange-500/20"
-                                : "border-white/10 bg-white/5 text-white/80 hover:bg-white/10"}
-                            `}
+                                : "border-white/10 bg-white/5 text-white/80 hover:bg-white/10"
+                            }`}
                           >
                             {i}
                           </button>
@@ -569,16 +632,11 @@ export default function DigitalPass() {
                       </div>
                       <FieldError msg={errors.interests} />
                     </div>
-
                     {formData.interests.includes("Other") && (
                       <div className="flex flex-col gap-1">
-                        <GlassInput
-                          label="Your interest"
+                        <GlassInput label="Your interest"
                           value={formData.otherInterest}
-                          onChange={(e) => {
-                            setFormData({ ...formData, otherInterest: e.target.value });
-                            setErrors((p) => ({ ...p, otherInterest: "" }));
-                          }}
+                          onChange={(e) => { setFormData({ ...formData, otherInterest: e.target.value }); setErrors((p) => ({ ...p, otherInterest: "" })); }}
                           error={errors.otherInterest}
                         />
                         {!errors.otherInterest && <Hint text="e.g. Photography, Art, Comedy" />}
@@ -586,16 +644,65 @@ export default function DigitalPass() {
                       </div>
                     )}
 
-                    {submitError && <p className="text-center text-sm text-red-400">{submitError}</p>}
-                    <div className="flex justify-center">
-                      <button
-                        onClick={submitMembership}
-                        disabled={loading}
-                        className={`${compactBtn} disabled:cursor-not-allowed disabled:opacity-60`}
-                      >
-                        {loading ? "Submitting..." : "Finish"}
-                      </button>
-                    </div>
+                    {/* UPDATE PROMPT OVERLAY */}
+                    <AnimatePresence>
+                      {showUpdatePrompt && (
+                        <motion.div
+                          initial={{ opacity: 0, y: 12, scale: 0.97 }}
+                          animate={{ opacity: 1, y: 0, scale: 1 }}
+                          exit={{ opacity: 0, y: 8, scale: 0.97 }}
+                          transition={{ type: "spring", stiffness: 260, damping: 24 }}
+                          className="
+                            absolute inset-x-0 bottom-0 z-40 mx-4 mb-4
+                            rounded-2xl border border-white/10
+                            bg-[#0f0f11]/95 backdrop-blur-2xl p-5
+                            flex flex-col gap-4
+                          "
+                        >
+                          <div className="text-center">
+                            <p className="text-base font-semibold text-white">
+                              Looks like you&apos;re already one of us! 👋
+                            </p>
+                            <p className="mt-1 text-xs text-white/50">
+                              Want to update your info with what you just entered?
+                            </p>
+                          </div>
+                          <div className="flex gap-3">
+                            <button
+                              onClick={handleShowPass}
+                              className="flex-1 h-10 rounded-xl border border-white/10 bg-white/5 text-sm text-white/70 transition hover:bg-white/10 active:scale-95"
+                            >
+                              Show my pass
+                            </button>
+                            <button
+                              onClick={handleUpdate}
+                              disabled={loading}
+                              className="flex-1 h-10 rounded-xl bg-white text-sm text-black transition hover:scale-[1.02] active:scale-[0.98] disabled:opacity-60"
+                            >
+                              {loading ? "Updating..." : "Update my info"}
+                            </button>
+                          </div>
+                          {submitError && (
+                            <p className="text-center text-xs text-red-400">{submitError}</p>
+                          )}
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+
+                    {!showUpdatePrompt && submitError && (
+                      <p className="text-center text-sm text-red-400">{submitError}</p>
+                    )}
+                    {!showUpdatePrompt && (
+                      <div className="flex justify-center">
+                        <button
+                          onClick={submitMembership}
+                          disabled={loading}
+                          className={`${compactBtn} disabled:cursor-not-allowed disabled:opacity-60`}
+                        >
+                          {loading ? "Submitting..." : "Finish"}
+                        </button>
+                      </div>
+                    )}
                   </StepWrapper>
                 )}
 
@@ -613,10 +720,8 @@ export default function DigitalPass() {
                           <svg viewBox="0 0 24 24" className="h-8 w-8" fill="none">
                             <motion.path
                               d="M5 13l4 4L19 7"
-                              stroke="#138808"
-                              strokeWidth="2.5"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
+                              stroke="#138808" strokeWidth="2.5"
+                              strokeLinecap="round" strokeLinejoin="round"
                               initial={{ pathLength: 0 }}
                               animate={{ pathLength: 1 }}
                               transition={{ duration: 0.5, delay: 0.4 }}
@@ -632,7 +737,7 @@ export default function DigitalPass() {
                       transition={{ delay: 0.55 }}
                       className="text-center text-xl font-semibold text-white"
                     >
-                      You&apos;re in! Welcome to ISA 🎉
+                      You&apos;re in! Welcome to UTD-ISA 🎉
                     </motion.p>
 
                     {/* MEMBER CARD */}
@@ -643,93 +748,60 @@ export default function DigitalPass() {
                       className="relative w-full"
                     >
                       <div className="absolute -inset-1 rounded-[2rem] bg-gradient-to-br from-[#FF9933]/25 via-transparent to-[#138808]/25 blur-xl" />
-
                       <div className="relative overflow-hidden rounded-[1.75rem] border border-white/10 bg-gradient-to-br from-white/[0.08] to-white/[0.03] backdrop-blur-2xl">
-
-                        {/* Tricolor stripe */}
                         <div className="flex h-1">
                           <div className="flex-1 bg-[#FF9933]" />
                           <div className="flex-1 bg-white" />
                           <div className="flex-1 bg-[#138808]" />
                         </div>
-
-                        {/* Shimmer sweep */}
                         <motion.div
-                          initial={{ x: "-100%" }}
-                          animate={{ x: "220%" }}
+                          initial={{ x: "-100%" }} animate={{ x: "220%" }}
                           transition={{ delay: 1.0, duration: 1.1, ease: "easeInOut" }}
                           className="absolute inset-0 w-1/2 bg-gradient-to-r from-transparent via-white/8 to-transparent -skew-x-12 pointer-events-none"
                         />
-
-                        <img
-                          src="/chakra.svg"
-                          className="absolute right-[-8px] top-[-8px] h-24 w-24 opacity-[0.06] pointer-events-none"
-                        />
-
+                        <img src="/chakra.svg" className="absolute right-[-8px] top-[-8px] h-24 w-24 opacity-[0.06] pointer-events-none" />
                         <div className="flex flex-col items-center gap-4 px-6 py-7">
-
                           <motion.div
-                            initial={{ opacity: 0, scale: 0.8 }}
-                            animate={{ opacity: 1, scale: 1 }}
+                            initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }}
                             transition={{ delay: 0.8 }}
                             className="flex h-14 w-14 items-center justify-center rounded-full border border-white/10 bg-black/40"
                           >
                             <img src="/isa-logo.png" className="h-9 w-9 object-contain" />
                           </motion.div>
-
                           <motion.p
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            transition={{ delay: 0.9 }}
+                            initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.9 }}
                             className="text-[10px] font-medium uppercase tracking-[0.4em] text-white/40"
                           >
-                            ISA · UTD · Member
+                            UTD · ISA · Member
                           </motion.p>
-
                           <div className="w-16 border-t border-white/10" />
-
-                          {/* Name */}
                           <motion.h3
-                            initial={{ opacity: 0, y: 6 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            transition={{ delay: 1.0 }}
+                            initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 1.0 }}
                             className="text-2xl font-semibold tracking-tight text-white text-center"
                           >
                             {formData.firstName} {formData.lastName}
                           </motion.h3>
-
-                          {/* Status */}
                           <motion.p
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            transition={{ delay: 1.1 }}
+                            initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 1.1 }}
                             className="text-sm text-white/60"
                           >
                             {formData.status}
                           </motion.p>
-
-                          {/* Semester range — "Fall 2025 – Spring 2027" */}
                           <motion.p
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            transition={{ delay: 1.2 }}
+                            initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 1.2 }}
                             className="text-sm text-white/60"
                           >
-                            {semesterRange}
+                            {/* semesterRange is only valid for newly submitted forms;
+                                for "show my pass" the combined range is already in graduationInfo */}
+                            {formData.startingSemester ? semesterRange : formData.graduationInfo}
                           </motion.p>
-
                           <div className="w-full border-t border-white/[0.07]" />
-
-                          {/* NetID */}
                           <motion.p
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            transition={{ delay: 1.3 }}
+                            initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 1.3 }}
                             className="text-xs tracking-wide text-white/30"
                           >
                             {formData.netId}@utdallas.edu
                           </motion.p>
-
                         </div>
                       </div>
                     </motion.div>
