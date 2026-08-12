@@ -433,6 +433,20 @@ export default function DigitalPass() {
             />
           </div>
 
+          {/* STEP INDICATOR — only shown during the actual form steps (1–4) */}
+          {step > 0 && step < 5 && (
+            <div className="absolute right-4 top-[4.5rem] sm:top-4 z-[75]">
+              <span
+                className="
+                  rounded-full border border-white/10 bg-black/40 backdrop-blur-md
+                  px-3 py-1.5 text-[11px] font-medium tracking-wide text-white/60
+                "
+              >
+                Step {step} of 4
+              </span>
+            </div>
+          )}
+
           {/* CONTENT */}
           <div
             className={`

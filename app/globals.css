@@ -1,5 +1,15 @@
 @import "tailwindcss";
 
+body {
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+}
+ 
+/* Use this class anywhere you want the website's serif display font
+   e.g. <h1 className="font-serif"> */
+.font-serif {
+  font-family: var(--font-cormorant), serif;
+}
+
 :root {
   color-scheme: dark;
 }
